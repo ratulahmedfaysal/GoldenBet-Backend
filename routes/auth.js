@@ -52,7 +52,9 @@ router.post('/register', async (req, res) => {
                 email: savedUser.email,
                 role: savedUser.role,
                 balance: savedUser.balance,
-                referral_code: savedUser.referral_code
+                balance: savedUser.balance,
+                referral_code: savedUser.referral_code,
+                two_factor_enabled: savedUser.two_factor_enabled
             }
         });
 
@@ -94,7 +96,9 @@ router.post('/login', async (req, res) => {
                 email: user.email,
                 role: user.role,
                 balance: user.balance,
-                referral_code: user.referral_code
+                balance: user.balance,
+                referral_code: user.referral_code,
+                two_factor_enabled: user.two_factor_enabled
             }
         });
 
@@ -217,7 +221,9 @@ router.post('/2fa/verify-login', async (req, res) => {
                     email: user.email,
                     role: user.role,
                     balance: user.balance,
-                    referral_code: user.referral_code
+                    balance: user.balance,
+                    referral_code: user.referral_code,
+                    two_factor_enabled: user.two_factor_enabled
                 }
             });
         } else {
