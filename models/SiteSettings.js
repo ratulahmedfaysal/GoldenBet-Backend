@@ -16,6 +16,10 @@ const siteSettingsSchema = new mongoose.Schema({
             telegram: { type: String, default: '#' },
             whatsapp: { type: String, default: '#' }
         },
+        tawkTo: {
+            isEnabled: { type: Boolean, default: false },
+            widgetId: { type: String, default: '' }
+        },
         luckyWheelPrizes: [{
             id: Number,
             label: String,
@@ -88,6 +92,14 @@ const siteSettingsSchema = new mongoose.Schema({
             minDeposit: { type: Number, default: 0 },
             rewardAmount: { type: Number, default: 0 },
             color: { type: String, default: '#fbbf24' }, // Gold default
+            perks: [String]
+        }],
+        referralLevels: [{
+            level: { type: Number, required: true },
+            name: { type: String, required: true },
+            minReferrals: { type: Number, default: 0 },
+            commission: { type: Number, default: 5 }, // Percentage
+            color: { type: String, default: '#fbbf24' },
             perks: [String]
         }]
     },

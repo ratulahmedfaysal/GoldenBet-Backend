@@ -5,6 +5,11 @@ const Deposit = require('../models/Deposit');
 const Withdrawal = require('../models/Withdrawal');
 const Transaction = require('../models/Transaction');
 const SiteSettings = require('../models/SiteSettings');
+const Notice = require('../models/Notice');
+const RedeemCode = require('../models/RedeemCode');
+const SpinHistory = require('../models/SpinHistory');
+const BonusHistory = require('../models/BonusHistory'); // Optional if strictly using Transaction
+const Blog = require('../models/Blog'); // Import Blog model
 const auth = require('../middleware/auth');
 
 // Middleware to check if admin
@@ -140,30 +145,65 @@ router.put('/deposits/:id', auth, isAdmin, async (req, res) => {
                 { status: 'completed', balance_after: user.balance }
             );
 
-            // MLM Referral Commissions
-            // For now, keep the simple 5% logic if we don't have MLM logic integrated yet
-            // But usually we should use ReferralSetting logic here.
-            // I will implement a simpler but dynamic version if time permits, or port the Aurabit one.
-            if (user.referred_by) {
-                const referrer = await User.findOne({ referral_code: user.referred_by });
-                if (referrer) {
-                    const commission = deposit.amount * 0.05;
-                    const refBalanceBefore = referrer.balance;
-                    referrer.balance += commission;
-                    await referrer.save();
+            // MLM Referral Commissions (Recursive Upstream)
+            try {
+                // Get all deposit levels sorted by level number (1, 2, 3...)
+                const mlmLevels = await ReferralSetting.find({ system_type: 'deposit', is_active: true }).sort({ level_number: 1 });
 
-                    const refTx = new Transaction({
-                        user_id: referrer._id,
-                        type: 'referral_commission',
-                        amount: commission,
-                        balance_before: refBalanceBefore,
-                        balance_after: referrer.balance,
-                        description: `5% Commission from ${user.username}'s deposit`,
-                        status: 'completed',
-                        reference_id: deposit._id
-                    });
-                    await refTx.save();
+                if (mlmLevels.length > 0) {
+                    let currentMember = user; // starting from the depositor
+                    let processedLevels = 0;
+                    const maxLevels = mlmLevels.length;
+
+                    // Loop through levels (1 to Max)
+                    // Level 1 Commission goes to direct referrer (parent)
+                    // Level 2 Commission goes to grandparent
+                    while (currentMember.referred_by && processedLevels < maxLevels) {
+                        const parentUser = await User.findOne({ referral_code: currentMember.referred_by });
+                        if (!parentUser) break;
+
+                        // Get setting for this level (index 0 is Level 1, etc.)
+                        const levelSetting = mlmLevels[processedLevels];
+
+                        // Calculate Commission
+                        // NOTE: levelSetting.level_number should correspond to (processedLevels + 1)
+                        // processedLevels = 0 -> We are looking for parent (Level 1 relation) -> Use Level 1 setting
+                        if (levelSetting && levelSetting.commission_percentage > 0) {
+                            const commissionAmount = deposit.amount * (levelSetting.commission_percentage / 100);
+
+                            // Pay the parent
+                            parentUser.balance += commissionAmount;
+                            await parentUser.save();
+
+                            // Log Transaction
+                            await new Transaction({
+                                user_id: parentUser._id,
+                                type: 'referral_commission',
+                                amount: commissionAmount,
+                                balance_before: parentUser.balance - commissionAmount,
+                                balance_after: parentUser.balance,
+                                description: `${levelSetting.commission_percentage}% Commission from Level ${levelSetting.level_number} referral (${user.username})`, // Show original user name
+                                status: 'completed',
+                                reference_id: deposit._id
+                            }).save();
+
+                            // Update/Create UserReferral record for tracking total earnings between these two
+                            // NOTE: This tracks "Total earned from X". 
+                            // In MLM, user A might earn from user C (Level 2).
+                            await UserReferral.findOneAndUpdate(
+                                { referrer_id: parentUser._id, referred_user_id: user._id },
+                                { $inc: { commission_earned: commissionAmount } },
+                                { upsert: true }
+                            );
+                        }
+
+                        // Move up the chain
+                        currentMember = parentUser;
+                        processedLevels++;
+                    }
                 }
+            } catch (err) {
+                console.error("MLM Commission Error:", err);
             }
         }
 
@@ -289,16 +329,153 @@ router.get('/stats', auth, isAdmin, async (req, res) => {
             { $group: { _id: null, total: { $sum: "$amount" } } }
         ]);
 
+        // Enhanced Stats
+        const activeRedeemCodes = await RedeemCode.countDocuments({
+            $or: [
+                { expiresAt: { $exists: false } },
+                { expiresAt: { $gt: new Date() } }
+            ]
+        });
+        const totalSpins = await SpinHistory.countDocuments({});
+
+        // Calculate total bonus distributed (using 'bonus' type transactions)
+        const totalBonusDoc = await Transaction.aggregate([
+            { $match: { type: 'bonus', status: 'completed' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+
+        // Calculate Total Bonuses Available (Balance held by users)
+        // const totalBonusAvailableDoc = await User.aggregate([
+        //     { $group: { _id: null, total: { $sum: "$bonus_balance" } } }
+        // ]);
+
+        // Count Active Bonuses from Site Settings (Content Management)
+        const settings = await SiteSettings.findOne();
+        const activeBonusesCount = settings?.general?.bonuses?.filter(b => b.isActive !== false).length || 0;
+
+        // Count Active Promotions
+        const activePromotions = await Blog.countDocuments({ type: 'promotion', status: 'published' });
+
         res.json({
             totalUsers,
             totalDeposits: totalDepositsDoc[0]?.total || 0,
             totalWithdrawals: totalWithdrawalsDoc[0]?.total || 0,
             pendingDeposits,
             pendingWithdrawals,
-            totalDepositCommissions: totalDepositCommissionsDoc[0]?.total || 0
+            totalDepositCommissions: totalDepositCommissionsDoc[0]?.total || 0,
+            activeRedeemCodes,
+            totalSpins,
+            totalBonusGiven: totalBonusDoc[0]?.total || 0,
+            totalBonusAvailable: activeBonusesCount, // Now returns count of active bonuses
+            activePromotions
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// --- Notices ---
+// --- Notices ---
+router.post('/notices', auth, isAdmin, async (req, res) => {
+    try {
+        const { recipient, subject, message, image, type } = req.body;
+        // If type is 'global' (Send to Everyone), recipient should be null
+        const noticeType = type === 'individual' ? 'personal' : (type || 'personal'); // normalize 'individual' to 'personal' just in case
+
+        if (noticeType === 'global') {
+            const notice = new Notice({
+                recipient: null,
+                type: 'global',
+                subject,
+                message,
+                image
+            });
+            await notice.save();
+            console.log("Created Global Notice:", notice._id);
+            res.json(notice);
+        } else {
+            // Personal - Recipient can be single ID or Array of IDs
+            if (Array.isArray(recipient)) {
+                console.log("Creating Personal Notices for:", recipient);
+                const notices = await Promise.all(recipient.map(uid =>
+                    new Notice({
+                        recipient: uid,
+                        type: 'personal',
+                        subject,
+                        message,
+                        image
+                    }).save()
+                ));
+                console.log("Created", notices.length, "notices");
+                res.json({ success: true, count: notices.length });
+            } else {
+                console.log("Creating Single Personal Notice for:", recipient);
+                // Single
+                const notice = new Notice({
+                    recipient: recipient,
+                    type: 'personal',
+                    subject,
+                    message,
+                    image
+                });
+                await notice.save();
+                console.log("Created Notice:", notice._id);
+                res.json(notice);
+            }
+        }
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// --- Redeem Codes ---
+router.get('/redeem-codes', auth, isAdmin, async (req, res) => {
+    try {
+        const codes = await RedeemCode.find().sort({ createdAt: -1 });
+        res.json(codes);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/redeem-codes', auth, isAdmin, async (req, res) => {
+    try {
+        const { code, rewardAmount, maxClaims, allowedUsers, expiresAt } = req.body;
+        const newCode = new RedeemCode({
+            code,
+            rewardAmount,
+            maxClaims,
+            allowedUsers: allowedUsers || [],
+            expiresAt: expiresAt || null
+        });
+        await newCode.save();
+        res.json(newCode);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+router.put('/redeem-codes/:id', auth, isAdmin, async (req, res) => {
+    try {
+        const { code, rewardAmount, maxClaims, allowedUsers, expiresAt } = req.body;
+
+        const updatedCode = await RedeemCode.findByIdAndUpdate(
+            req.params.id,
+            {
+                code,
+                rewardAmount,
+                maxClaims,
+                allowedUsers: allowedUsers || [],
+                expiresAt: expiresAt || null
+            },
+            { new: true, runValidators: true }
+        );
+
+        if (!updatedCode) return res.status(404).json({ error: 'Code not found' });
+
+        res.json(updatedCode);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
     }
 });
 

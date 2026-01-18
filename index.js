@@ -31,6 +31,7 @@ app.use('/api/database', require('./routes/database'));
 app.use('/api/blogs', require('./routes/blog'));
 app.use('/api/lucky-wheel', require('./routes/lucky_wheel'));
 app.use('/api/bonuses', require('./routes/bonuses'));
+app.use('/api/user', require('./routes/user'));
 
 app.get('/api/health', (req, res) => {
     res.json({

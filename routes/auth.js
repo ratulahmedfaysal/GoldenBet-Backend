@@ -117,7 +117,7 @@ router.get('/user', auth, async (req, res) => {
 router.get('/referrals', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user);
-        const referrals = await User.find({ referred_by: user.referral_code }).select('username email createdAt status total_deposit');
+        const referrals = await User.find({ referred_by: user.referral_code }).select('username email created_at status total_deposit');
         res.json(referrals);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -223,6 +223,31 @@ router.post('/2fa/verify-login', async (req, res) => {
         } else {
             res.status(400).json({ error: 'Invalid verification token' });
         }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Change Password
+router.post('/change-password', auth, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ error: 'Please enter all fields' });
+        }
+
+        const user = await User.findById(req.user);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        const isMatch = await bcrypt.compare(currentPassword, user.password);
+        if (!isMatch) return res.status(400).json({ error: 'Invalid current password' });
+
+        const salt = await bcrypt.genSalt(10);
+        user.password = await bcrypt.hash(newPassword, salt);
+        await user.save();
+
+        res.json({ success: true, message: 'Password updated successfully' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
